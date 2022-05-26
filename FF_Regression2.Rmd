@@ -1,0 +1,406 @@
+---
+title: "Forest Fires Regression"
+author: "Jack Donohue"
+date: "5/22/2022"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, engine.path = list(python = '/Users/JND17/AppData/Local/r-miniconda/envs/r-reticulate/python.exe'))
+```
+
+
+
+
+# ***Project Still in Progrss ***
+
+```{r, include=FALSE}
+
+# Load libraries and forest 
+
+library(plyr); library(dplyr)
+library(tidyverse)
+library(naniar)
+library(mapview)
+library(SpatialEpi)
+
+forest = read.csv('forest.csv')
+
+view(forest)
+
+```
+
+
+```{r}
+# Check Missing data and rename variables
+
+forest = forest %>% 
+  rename(
+    X.Cord = X,
+    Y.Cord = Y,
+    temp.C = temp,
+    Relative.Humidity = RH,
+    Area.Burned = area,     
+    Fine.Moisture = FFMC,   #  represents moisture conditions (16 hour time lag) range from 0-101, subtract from 100 for 10 hr time lag (most accurate with fine.moisture > 80)
+    
+    Duff.Moisture = DMC,    # Unit less approximation of moisture conditions (15 day time lag)
+    
+    Drought.Code = DC,      # Unit less approximation of moisture conditions (53 day time lag) - extreme drought ~800 (max 1000)
+    
+    Initial.Spread = ISI    # Unit less index to estimate fire spread potential
+    )
+
+# ADD 10 hr time lag variable
+
+#forest$Fine.10hr = 100 - forest$Fine.Moisture
+
+# No missing data
+
+sum(is.na(forest))
+
+```
+
+
+```{r}
+# Area Burned is extremely skewed to 0, log transform this variable before modeling
+
+forest$Area.Burned = case_when(forest$Area.Burned != 0 ~ log(forest$Area.Burned))
+
+
+# this produced NaN values, Change back to 0
+
+forest$Area.Burned[is.na(forest$Area.Burned)] = 0
+
+# Remove original column and replace with log.Area heading
+
+forest$log.Area = forest$Area.Burned
+
+forest = forest %>% 
+  dplyr::select(-c(Area.Burned))
+
+# We are only interested in observations where there was more than 0 ha burned 
+
+#forest = forest[ forest$Area.Burned != 0.000000000,]
+
+
+
+```
+
+
+```{r}
+
+# Re factor character variables
+
+forest$month = factor(forest$month,levels = c('jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'))
+levels(forest$month)
+
+forest$day = factor(forest$day,levels = c('sun','mon','tue','wed','thur','fri','sat'))
+levels(forest$day)
+
+```
+
+```{r,include=False}
+
+# Create data frame with only dependent and independent variables of interest
+
+attach(forest)
+
+forest.numeric = forest %>%
+  dplyr::select(-c(month,day,X.Cord,Y.Cord))
+
+
+```
+
+```{r}
+
+# Pars matrix with correlations
+attach(forest.numeric)
+library(GGally)
+ggpairs(forest.numeric[,3:9])
+
+```
+
+
+
+```{r}
+# Exploratory Data Analysis 
+
+ggplot(forest,aes(x=month,y=log.Area))+
+  geom_boxplot(fill='dark red')+
+  labs(x='Month',y='Area Burned (log)',title = 'Area Burned by Fires - Month')+
+  theme(axis.text.x = element_text(angle = 45))
+
+# May want to log transform Area variable as in this plot, highly skewed to low end
+
+```
+
+
+```{r}
+
+ggplot(forest,aes(x=wind,y=log.Area,color=month))+
+  geom_point(fill='dark red')+
+  labs(x='Wind',y='Area Burned (log)',title = 'Area Burned and wind Speed by Month')+
+  theme(axis.text.x = element_text(angle = 45))
+
+```
+
+
+```{r}
+
+ggplot(forest.numeric,aes(x=Fine.Moisture,y=Initial.Spread,color=temp.C))+
+  geom_point(fill='dark red')+
+  labs(x='Moisture 10hr ',y='Initial Spread',title = 'Initial Spread  by Moisture 10hr lag')+
+  theme(axis.text.x = element_text(angle = 45))
+
+
+
+```
+
+```{r}
+sum(is.na(forest.numeric))
+```
+
+
+ # From Previous round 
+
+
+```{r}
+# Check for multicolinearity and drop variables with > 20 VIF
+
+library(faraway)
+
+vif(forest.numeric)
+
+# Multicolinearity does not seem to be present based on VIF
+# VIF < 5 cutoff used
+```
+
+```{r}
+# Split training and test forest
+
+library(faraway)
+
+set.seed(6021) ##for reproducibility to get the same split
+sample<-sample.int(nrow(forest.numeric), floor(.50*nrow(forest.numeric)), replace = F)
+train<-forest.numeric[sample, ] ##training forest frame
+test<-forest.numeric[-sample, ] ##test forest frame
+
+
+
+# Automated Search procedures to find the right model
+
+library(leaps)
+
+#Set up full and intercept only regression models
+
+full_model = lm(log.Area~.,data = train) 
+
+intercept_only = lm(log.Area~1,data = train)
+
+# Run all possible regressions
+
+all_regressions = regsubsets(log.Area~.,data = train,nbest=1)
+summary(all_regressions)
+```
+
+```{r}
+# Coefficients of best ,models based on ADJ-R2 , CP, and BIC
+
+coef(all_regressions, which.max((summary(all_regressions)$adjr2)))
+
+coef(all_regressions,which.min(summary(all_regressions)$cp))
+
+coef(all_regressions,which.min(summary(all_regressions)$bic))
+
+```
+
+````{r}
+# Forward Selection 
+
+step(intercept_only,scope = list(lower=intercept_only,upper=full_model),direction='forward')
+
+```
+
+
+
+
+```{r}
+# Fit the model 
+
+model = lm(data=train,log.Area~Fine.Moisture + Initial.Spread + temp.C +  wind + rain)
+
+summary(model)
+
+```
+
+```{r}
+# Check Model assumptions
+
+# Confidence interval for the mean response
+
+confint(model,level = 0.95)
+
+# Fitted Values & Residuals
+
+yhat = model$fitted.values
+residuals = model$residuals
+
+train2 = data.frame(yhat,residuals)  # was not able to add to original forest frame because of differing lengths
+
+```
+
+```{r}
+
+# Residual Plot
+
+ggplot(train2,aes(x=yhat,y=residuals))+
+  geom_point()+
+  geom_hline(yintercept=0,color='red')+
+  labs(x='Fitted Y',y='Residuals',title= 'Residual Plot')
+
+# Residuals don't have constant variance 
+
+# Normal QQ plot 
+
+qqnorm(residuals)
+qqline(residuals,color='red')  # Data is not normally distributed
+
+
+
+# ACF Plot
+
+acf(residuals,main='ACF')   # Auto-correlation present at lag 15
+
+library(MASS)
+boxcox(model)
+
+
+```
+
+```{r}
+# Transform the variables 
+
+
+train$Fine.Moisture = log(train$Fine.Moisture)
+
+train$Duff.Moisture=log(train$Duff.Moisture)
+
+train$wind = log(train$wind)
+
+
+
+
+model2 = lm(data=train,log.Area~Fine.Moisture + Duff.Moisture + temp.C +  wind)
+
+summary(model2)
+
+# Fitted Values & Residuals
+
+train2$yhat2 = model2$fitted.values
+train2$residuals2 = model2$residuals
+
+# Residual Plot
+
+ggplot(train2,aes(x=yhat2,y=residuals2))+
+  geom_point()+
+  geom_hline(yintercept=0,color='red')+
+  labs(x='Fitted Y',y='Residuals',title= 'Residual Plot log')
+
+# Residuals don't have constant variance 
+
+# Normal QQ plot 
+
+qqnorm(residuals2)
+qqline(residuals2,color='red')  # Data is not normally distributed
+
+
+
+# ACF Plot
+
+acf(residuals2,main='ACF')   # Auto-correlation present at lag 15
+
+boxcox(model2)
+
+
+```
+
+
+```{r,include=FALSE}
+
+# Use python and Geo Pandas for Geo Spatial Analysis
+
+library(reticulate)
+
+conda_create("r-reticulate")
+
+
+conda_install('r-reticulate','pandas')
+conda_install('r-reticulate','numpy') 
+conda_install('r-reticulate','matplotlib')
+conda_install('r-reticulate','geopandas')
+conda_install('r-reticulate','descartes') 
+conda_install('r-reticulate','shapely')
+
+```
+
+```{python}
+import pandas as pd
+import numpy as np 
+import matplotlib.pyplot as plt
+import seaborn as sns
+import geopandas as gpd
+import descartes
+from shapely.geometry import Point, Polygon
+
+
+```
+
+
+```{python}
+
+# Download and read in map shapefile
+
+Port_map = gpd.read_file('pt_1km.shp')
+
+# Plot the shapefile map 
+
+fig,ax = plt.subplots(figsize = (15,15))
+Port_map.plot(ax=ax);
+
+```
+
+```{python}
+
+# Set CRS and data 
+
+data2 = forest
+crs = CRS('EPSG: 4326')
+
+# Set geometric points from the latitude and longitude
+
+geometry = [Point(xy) for xy in zip( data2['X'],data2['Y'])]
+geometry[:3]
+
+# Create a geopandas dataframe
+geo_data = gpd.GeoDataFrame(data2,crs=crs,geometry=geometry)
+
+```
+
+```{python}
+
+# Plot the final map with points
+
+fig,ax = plt.subplots(figsize=(15,15))
+us_map.plot(ax=ax,alpha=0.4,color='grey')
+geo_data[geo_data['INDICATED_DAMAGE']==0].plot(ax=ax,markersize=2,color='blue',marker='o',label='No damage')
+plt.legend(prop={'size':15});
+
+```
+
+
+
+
+
+
+
+
